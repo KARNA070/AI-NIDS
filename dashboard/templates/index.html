@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-NIDS | Network Intrusion Detection System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- ── Scan-line overlay ──────────────────────────────────────────── -->
+<div class="scanlines"></div>
+<div class="grid-bg"></div>
+
+<!-- ── Header ────────────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo">
+      <span class="logo-bracket">[</span>
+      <span class="logo-text">AI</span><span class="logo-sep">-</span><span class="logo-text">NIDS</span>
+      <span class="logo-bracket">]</span>
+    </div>
+    <span class="subtitle">Network Intrusion Detection System</span>
+  </div>
+  <div class="header-right">
+    <div class="status-indicator" id="status-dot"></div>
+    <span id="status-text">CONNECTING…</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+</header>
+
+<!-- ── Stat cards ─────────────────────────────────────────────────── -->
+<section class="stat-grid">
+  <div class="stat-card" id="card-packets">
+    <div class="stat-label">PACKETS ANALYSED</div>
+    <div class="stat-value" id="stat-packets">0</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="bar-packets"></div></div>
+  </div>
+  <div class="stat-card danger" id="card-attacks">
+    <div class="stat-label">INTRUSIONS DETECTED</div>
+    <div class="stat-value" id="stat-attacks">0</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="bar-attacks"></div></div>
+  </div>
+  <div class="stat-card warn" id="card-blocked">
+    <div class="stat-label">IPs BLOCKED</div>
+    <div class="stat-value" id="stat-blocked">0</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="bar-blocked"></div></div>
+  </div>
+  <div class="stat-card info" id="card-uptime">
+    <div class="stat-label">SYSTEM UPTIME</div>
+    <div class="stat-value" id="stat-uptime">0s</div>
+    <div class="stat-bar"><div class="stat-bar-fill" style="width:100%"></div></div>
+  </div>
+</section>
+
+<!-- ── Charts row ─────────────────────────────────────────────────── -->
+<section class="charts-row">
+  <div class="chart-card">
+    <div class="chart-title">ATTACK DISTRIBUTION</div>
+    <canvas id="attackChart"></canvas>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">SEVERITY BREAKDOWN</div>
+    <canvas id="severityChart"></canvas>
+  </div>
+  <div class="chart-card wide">
+    <div class="chart-title">TRAFFIC TIMELINE (last 60 events)</div>
+    <canvas id="timelineChart"></canvas>
+  </div>
+</section>
+
+<!-- ── Live event log ─────────────────────────────────────────────── -->
+<section class="log-section">
+  <div class="log-header">
+    <span class="log-title">▶ LIVE EVENT LOG</span>
+    <div class="log-controls">
+      <label class="toggle-label">
+        <input type="checkbox" id="pause-toggle"> PAUSE
+      </label>
+      <button id="clear-btn" onclick="clearLog()">CLEAR</button>
+      <button id="export-btn" onclick="exportCSV()">EXPORT CSV</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table id="log-table">
+      <thead>
+        <tr>
+          <th>TIME</th>
+          <th>SOURCE IP</th>
+          <th>DEST IP</th>
+          <th>PROTO</th>
+          <th>SERVICE</th>
+          <th>ATTACK TYPE</th>
+          <th>SEVERITY</th>
+          <th>CONFIDENCE</th>
+          <th>BLOCKED</th>
+        </tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── Blocked IPs panel ──────────────────────────────────────────── -->
+<section class="blocked-section">
+  <div class="log-title">🔒 BLOCKED IP ADDRESSES</div>
+  <div id="blocked-list" class="blocked-list">
+    <span class="no-data">No IPs blocked yet.</span>
+  </div>
+</section>
+
+<script>
+/* ── Socket.IO ─────────────────────────────────────────────── */
+const socket = io();
+let paused = false;
+let allEvents = [];
+
+const MAX_ROWS = 200;
+
+socket.on('connect', () => {
+  setStatus(true);
+});
+socket.on('disconnect', () => {
+  setStatus(false);
+});
+socket.on('history', (events) => {
+  events.forEach(e => addRow(e, false));
+});
+socket.on('new_event', (event) => {
+  allEvents.push(event);
+  if (!paused) addRow(event, true);
+});
+socket.on('stats', (s) => {
+  updateStats(s);
+  updateCharts(s);
+  updateUptime(s.uptime_seconds);
+});
+
+/* ── Status indicator ──────────────────────────────────────── */
+function setStatus(connected) {
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  dot.className  = 'status-indicator ' + (connected ? 'connected' : 'disconnected');
+  text.textContent = connected ? 'LIVE' : 'OFFLINE';
+}
+
+/* ── Clock ─────────────────────────────────────────────────── */
+function tickClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB');
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+/* ── Pause toggle ──────────────────────────────────────────── */
+document.getElementById('pause-toggle').addEventListener('change', (e) => {
+  paused = e.target.checked;
+  if (!paused) {
+    // flush buffered events
+    allEvents.slice(-MAX_ROWS).forEach(ev => addRow(ev, false));
+  }
+});
+
+/* ── Severity colours ──────────────────────────────────────── */
+const SEV_CLASS = {
+  'INFO':     'sev-info',
+  'LOW':      'sev-low',
+  'MEDIUM':   'sev-medium',
+  'HIGH':     'sev-high',
+  'CRITICAL': 'sev-critical',
+};
+const ATTACK_ICON = {
+  'Normal':     '✅',
+  'DoS':        '🔥',
+  'PortScan':   '🔍',
+  'BruteForce': '🔑',
+  'Exploit':    '💀',
+};
+
+/* ── Row insertion ─────────────────────────────────────────── */
+function addRow(ev, animate) {
+  const tbody = document.getElementById('log-body');
+
+  // Limit rows
+  while (tbody.rows.length >= MAX_ROWS) {
+    tbody.deleteRow(tbody.rows.length - 1);
+  }
+
+  const tr = document.createElement('tr');
+  const sevClass = SEV_CLASS[ev.severity] || 'sev-low';
+  tr.className = sevClass + (animate ? ' row-new' : '');
+  if (ev.attack_type !== 'Normal') tr.classList.add('row-attack');
+
+  const icon = ATTACK_ICON[ev.attack_type] || '⚠️';
+  const conf = typeof ev.confidence === 'number'
+    ? ev.confidence.toFixed(1) + '%'
+    : ev.confidence + '%';
+
+  tr.innerHTML = `
+    <td class="mono">${ev.time_str || '--'}</td>
+    <td class="mono">${ev.src_ip}</td>
+    <td class="mono">${ev.dst_ip}</td>
+    <td>${ev.protocol.toUpperCase()}</td>
+    <td>${ev.service}</td>
+    <td><span class="attack-badge">${icon} ${ev.attack_type}</span></td>
+    <td><span class="sev-badge ${sevClass}">${ev.severity}</span></td>
+    <td>
+      <div class="conf-wrap">
+        <div class="conf-bar" style="width:${parseFloat(conf)}%"></div>
+        <span>${conf}</span>
+      </div>
+    </td>
+    <td>${ev.blocked ? '<span class="blocked-yes">BLOCKED</span>' : '—'}</td>
+  `;
+
+  tbody.insertBefore(tr, tbody.firstChild);
+  if (animate) {
+    setTimeout(() => tr.classList.remove('row-new'), 600);
+  }
+}
+
+/* ── Stats update ──────────────────────────────────────────── */
+function updateStats(s) {
+  document.getElementById('stat-packets').textContent = s.total_packets.toLocaleString();
+  document.getElementById('stat-attacks').textContent = s.total_attacks.toLocaleString();
+  document.getElementById('stat-blocked').textContent = s.blocked_ips.toLocaleString();
+
+  const pct = s.total_packets > 0
+    ? Math.min(100, (s.total_attacks / s.total_packets) * 100) : 0;
+  document.getElementById('bar-attacks').style.width = pct + '%';
+  document.getElementById('bar-packets').style.width = '100%';
+}
+
+function updateUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  document.getElementById('stat-uptime').textContent =
+    (h > 0 ? h + 'h ' : '') + (m > 0 ? m + 'm ' : '') + s + 's';
+}
+
+/* ── Charts ────────────────────────────────────────────────── */
+const CHART_COLOURS = ['#00ff9d','#ff3860','#ffdd57','#3273dc','#ff6b6b','#48c774'];
+
+const attackCtx    = document.getElementById('attackChart').getContext('2d');
+const severityCtx  = document.getElementById('severityChart').getContext('2d');
+const timelineCtx  = document.getElementById('timelineChart').getContext('2d');
+
+const chartDefaults = {
+  plugins: { legend: { labels: { color: '#7aff9d', font: { family: 'Share Tech Mono' } } } },
+  scales: {},
+};
+
+const attackChart = new Chart(attackCtx, {
+  type: 'doughnut',
+  data: { labels: [], datasets: [{ data: [], backgroundColor: CHART_COLOURS }] },
+  options: { ...chartDefaults, cutout: '65%' },
+});
+
+const severityChart = new Chart(severityCtx, {
+  type: 'bar',
+  data: {
+    labels: ['INFO','LOW','MEDIUM','HIGH','CRITICAL'],
+    datasets: [{
+      data: [0,0,0,0,0],
+      backgroundColor: ['#00ff9d','#48c774','#ffdd57','#ff6b6b','#ff3860'],
+    }]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#7aff9d', font: { family: 'Share Tech Mono' } }, grid: { color: '#1a3a2a' } },
+      y: { ticks: { color: '#7aff9d', font: { family: 'Share Tech Mono' } }, grid: { color: '#1a3a2a' } },
+    },
+  },
+});
+
+// Timeline: rolling 60-point line chart
+const timelineData = Array(60).fill(0);
+const timelineChart = new Chart(timelineCtx, {
+  type: 'line',
+  data: {
+    labels: Array(60).fill(''),
+    datasets: [
+      {
+        label: 'Packets',
+        data: [...timelineData],
+        borderColor: '#00ff9d',
+        backgroundColor: 'rgba(0,255,157,0.08)',
+        fill: true, tension: 0.4, pointRadius: 0,
+      },
+      {
+        label: 'Attacks',
+        data: Array(60).fill(0),
+        borderColor: '#ff3860',
+        backgroundColor: 'rgba(255,56,96,0.12)',
+        fill: true, tension: 0.4, pointRadius: 0,
+      },
+    ],
+  },
+  options: {
+    ...chartDefaults,
+    animation: false,
+    scales: {
+      x: { display: false },
+      y: { ticks: { color: '#7aff9d', font: { family: 'Share Tech Mono' } }, grid: { color: '#1a3a2a' }, beginAtZero: true },
+    },
+  },
+});
+
+let prevTotal = 0, prevAttacks = 0;
+
+function updateCharts(s) {
+  // Attack doughnut
+  const ac = s.attack_counts;
+  attackChart.data.labels   = Object.keys(ac);
+  attackChart.data.datasets[0].data = Object.values(ac);
+  attackChart.update('none');
+
+  // Severity bar
+  const sc = s.severity_counts;
+  ['INFO','LOW','MEDIUM','HIGH','CRITICAL'].forEach((k, i) => {
+    severityChart.data.datasets[0].data[i] = sc[k] || 0;
+  });
+  severityChart.update('none');
+
+  // Timeline rolling
+  const deltaPackets = s.total_packets - prevTotal;
+  const deltaAttacks = s.total_attacks - prevAttacks;
+  prevTotal   = s.total_packets;
+  prevAttacks = s.total_attacks;
+
+  timelineChart.data.datasets[0].data.push(deltaPackets);
+  timelineChart.data.datasets[0].data.shift();
+  timelineChart.data.datasets[1].data.push(deltaAttacks);
+  timelineChart.data.datasets[1].data.shift();
+  timelineChart.update('none');
+}
+
+/* ── Blocked IPs ───────────────────────────────────────────── */
+socket.on('stats', (s) => {
+  // Refresh blocked list via REST
+  fetch('/api/blocked').then(r => r.json()).then(ips => {
+    const el = document.getElementById('blocked-list');
+    if (ips.length === 0) {
+      el.innerHTML = '<span class="no-data">No IPs blocked yet.</span>';
+    } else {
+      el.innerHTML = ips.map(ip =>
+        `<span class="blocked-chip">🔒 ${ip}</span>`
+      ).join('');
+    }
+  });
+});
+
+/* ── Clear + Export ────────────────────────────────────────── */
+function clearLog() {
+  document.getElementById('log-body').innerHTML = '';
+  allEvents = [];
+}
+
+function exportCSV() {
+  const headers = ['time','src_ip','dst_ip','protocol','service','attack_type','severity','confidence','blocked'];
+  const rows = allEvents.map(e =>
+    headers.map(h => JSON.stringify(e[h] ?? '')).join(',')
+  );
+  const csv = [headers.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'nids_events_' + Date.now() + '.csv';
+  a.click();
+}
+</script>
+</body>
+</html>
