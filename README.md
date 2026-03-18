@@ -1,6 +1,5 @@
 # AI-Enhanced Network Intrusion Detection System (AI-NIDS)
-
-> **BSc Cyber Security Final Year Project**  
+  
 > Real-time ML-powered network intrusion detection with live web dashboard.
 
 ---
