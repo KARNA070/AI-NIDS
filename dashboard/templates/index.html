@@ -44,8 +44,10 @@
       </a>
     </nav>
     <div class="sidebar-footer">
-      <div>System v1.2.0</div>
-      <div>© 2026 AI-NIDS</div>
+      <a href="/logout" class="nav-item logout-link" title="Sign Out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+        <span>Logout</span>
+      </a>
     </div>
   </aside>
 
@@ -60,7 +62,13 @@
         <div class="timer" id="clock">00:00:00</div>
       </div>
       <div class="header-actions">
-        <!-- Placeholder for user profile etc -->
+        <div class="user-profile">
+          <div class="user-avatar">A</div>
+          <span class="user-name">Admin</span>
+          <a href="/logout" class="icon-btn-logout" title="Sign Out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+          </a>
+        </div>
       </div>
     </header>
 
@@ -109,28 +117,66 @@
 
       <!-- ── Live Monitor View ── -->
       <div id="view-live" class="view-section">
-        <h2 class="section-title">Live Traffic Monitor</h2>
-        <div class="controls-bar">
-          <button class="btn-secondary" onclick="clearLog()">Clear Stream</button>
-          <button class="btn-secondary" onclick="exportCSV()">Export CSV</button>
+        <div class="live-header">
+          <h2 class="section-title">Live Traffic Monitor</h2>
+          <div class="live-tag">LIVE</div>
         </div>
-        <div class="table-container">
-          <table id="live-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Source IP</th>
-                <th>Dest IP</th>
-                <th>Proto</th>
-                <th>Service</th>
-                <th>Attack Type</th>
-                <th>Severity</th>
-                <th>Confidence</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="live-body"></tbody>
-          </table>
+
+        <div class="live-stats-bar">
+          <div class="live-stat-item">
+            <div class="ls-label">Total Requests</div>
+            <div class="ls-value" id="ls-analysed">0</div>
+          </div>
+          <div class="live-stat-item danger">
+            <div class="ls-label">Alerts</div>
+            <div class="ls-value" id="ls-alerts-count">0</div>
+          </div>
+          <div class="live-stat-item">
+            <div class="ls-label">Unique IPs</div>
+            <div class="ls-value" id="ls-ips">0</div>
+          </div>
+          <div class="live-stat-item info">
+            <div class="ls-label">Req / Min</div>
+            <div class="ls-value" id="ls-rate">0</div>
+          </div>
+        </div>
+
+        <div class="live-grid">
+          <!-- Left: Live Alerts -->
+          <div class="live-alerts-panel">
+            <div class="panel-header">
+              <span class="panel-title">Live Alerts</span>
+              <span class="badge badge-info" id="ls-alerts-filtered">0</span>
+            </div>
+            <div class="alerts-list" id="ls-alerts-list">
+              <div class="no-data" style="padding: 20px; text-align: center;">Waiting for incoming alerts...</div>
+            </div>
+          </div>
+
+          <!-- Right: Traffic Stream -->
+          <div class="live-traffic-panel">
+            <div class="panel-header">
+              <span class="panel-title">HTTP Traffic Stream</span>
+              <div class="controls-bar" style="margin-bottom:0">
+                <button class="btn-secondary" onclick="clearLog()">Clear</button>
+                <button class="btn-secondary" onclick="exportCSV()">Export</button>
+              </div>
+            </div>
+            <div class="table-container">
+              <table id="live-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Method</th>
+                    <th>Status</th>
+                    <th>Source IP</th>
+                    <th>URL</th>
+                  </tr>
+                </thead>
+                <tbody id="live-body"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -347,22 +393,20 @@
 <script>
 /* ── View Management ── */
 function showView(viewId, element) {
-  // Hide all views
   document.querySelectorAll('.view-section').forEach(v => v.classList.remove('active'));
-  // Deactivate all nav items
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  
-  // Show target view
   document.getElementById('view-' + viewId).classList.add('active');
-  // Activate clicked nav item
   element.classList.add('active');
 }
 
-/* ── Socket.IO ── */
+/* ── Global State ── */
 const socket = io();
 let allEvents = [];
-const MAX_ROWS = 100;
+let uniqueIps = new Set();
+const MAX_ROWS = 50;
+const MAX_ALERTS = 20;
 
+/* ── Socket.IO ── */
 socket.on('connect', () => setStatus(true));
 socket.on('disconnect', () => setStatus(false));
 
@@ -381,12 +425,22 @@ socket.on('stats', (s) => {
   updateUptime(s.uptime_seconds);
 });
 
+/* ── Event Processing ── */
 function processEvent(ev) {
-  // Add to Live Monitor
-  addRow('live-body', ev);
-  // Add to Logs
+  // Update unique IPs
+  uniqueIps.add(ev.src_ip);
+  document.getElementById('ls-ips').textContent = uniqueIps.size;
+  
+  // Add to Traffic Stream
+  addTrafficRow(ev);
+  
+  // Add to Live Alerts if malicious
+  if (ev.attack_type !== 'Normal') {
+    addAlertCard(ev);
+  }
+  
+  // Update other views in background
   addRow('logs-body', ev);
-  // Add to Alerts if critical/high
   if (ev.severity === 'HIGH' || ev.severity === 'CRITICAL') {
     addRow('alerts-body', ev);
   }
@@ -397,7 +451,7 @@ function setStatus(connected) {
   const dot = document.getElementById('status-dot');
   const text = document.getElementById('status-text');
   dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
-  text.textContent = connected ? 'LIVE' : 'OFFLINE';
+  text.textContent = connected ? 'CONNECTED' : 'DISCONNECTED';
 }
 
 function tickClock() {
@@ -411,23 +465,20 @@ function getSevBadge(sev) {
   return `<span class="badge badge-${cls}">${sev}</span>`;
 }
 
+/* Adds a row to the simple tables (Logs, Alerts View) */
 function addRow(targetId, ev) {
   const tbody = document.getElementById(targetId);
   if (!tbody) return;
 
   const tr = document.createElement('tr');
-  
-  if (targetId === 'live-body') {
+  if (targetId === 'logs-body') {
     tr.innerHTML = `
       <td class="mono">${ev.time_str || '--'}</td>
       <td class="mono">${ev.src_ip}</td>
       <td class="mono">${ev.dst_ip}</td>
       <td>${ev.protocol.toUpperCase()}</td>
-      <td>${ev.service}</td>
       <td>${ev.attack_type}</td>
       <td>${getSevBadge(ev.severity)}</td>
-      <td>${ev.confidence.toFixed(1)}%</td>
-      <td>${ev.blocked ? '<span class="status-badge blocked">BLOCKED</span>' : '<span class="status-badge allowed">ALLOWED</span>'}</td>
     `;
   } else if (targetId === 'alerts-body') {
     tr.innerHTML = `
@@ -438,32 +489,93 @@ function addRow(targetId, ev) {
       <td>${ev.confidence.toFixed(1)}%</td>
       <td>${ev.blocked ? '<span class="status-badge blocked">BLOCKED</span>' : '<span class="status-badge allowed">LOGGED</span>'}</td>
     `;
-  } else if (targetId === 'logs-body') {
-    tr.innerHTML = `
-      <td class="mono">${ev.time_str || '--'}</td>
-      <td class="mono">${ev.src_ip}</td>
-      <td class="mono">${ev.dst_ip}</td>
-      <td>${ev.protocol.toUpperCase()}</td>
-      <td>${ev.attack_type}</td>
-      <td>${getSevBadge(ev.severity)}</td>
-    `;
   }
+
+  tbody.insertBefore(tr, tbody.firstChild);
+  if (tbody.rows.length > 200) tbody.deleteRow(tbody.rows.length - 1);
+}
+
+/* Adds a row to the Live Traffic Stream table */
+function addTrafficRow(ev) {
+  const tbody = document.getElementById('live-body');
+  if (!tbody) return;
+
+  const tr = document.createElement('tr');
+  // We use Proto/Attack Type as fillers for Method/Status since this is a NIDS not a WAF
+  tr.innerHTML = `
+    <td class="mono">${ev.time_str || '--'}</td>
+    <td><span class="badge badge-info">${ev.protocol.toUpperCase()}</span></td>
+    <td>${ev.service}</td>
+    <td class="mono">${ev.src_ip}</td>
+    <td><span class="mono">${ev.attack_type}</span></td>
+  `;
 
   tbody.insertBefore(tr, tbody.firstChild);
   if (tbody.rows.length > MAX_ROWS) tbody.deleteRow(tbody.rows.length - 1);
 }
 
+/* Adds a card to the Live Alerts panel */
+function addAlertCard(ev) {
+  const list = document.getElementById('ls-alerts-list');
+  if (!list) return;
+
+  // Remove placeholder if it exists
+  const noData = list.querySelector('.no-data');
+  if (noData) noData.remove();
+
+  const card = document.createElement('div');
+  const sev = ev.severity.toLowerCase();
+  card.className = `alert-mini-card ${sev}`;
+  
+  card.innerHTML = `
+    <div class="amc-header">
+      <span class="amc-severity ${sev}">${ev.severity}</span>
+      <span class="amc-time">${ev.time_str || '--'}</span>
+    </div>
+    <div class="amc-title">${ev.attack_type} attempt detected</div>
+    <div class="amc-ip">Source: ${ev.src_ip}</div>
+  `;
+
+  list.insertBefore(card, list.firstChild);
+  if (list.children.length > MAX_ALERTS) list.removeChild(list.lastChild);
+  
+  // Update count badge
+  const filteredBadge = document.getElementById('ls-alerts-filtered');
+  filteredBadge.textContent = list.children.length;
+}
+
+/* ── Stats ── */
+let lastPacketCount = 0;
+let lastUpdate = Date.now();
+
 function updateStats(s) {
+  // Dashboard stats
   document.getElementById('stat-packets').textContent = s.total_packets.toLocaleString();
   document.getElementById('stat-attacks').textContent = s.total_attacks.toLocaleString();
   document.getElementById('stat-blocked').textContent = s.blocked_ips.toLocaleString();
+  
+  // Live Monitor stats
+  document.getElementById('ls-analysed').textContent = s.total_packets.toLocaleString();
+  document.getElementById('ls-alerts-count').textContent = s.total_attacks.toLocaleString();
+  
+  // Calculate rate
+  const now = Date.now();
+  const elapsed = (now - lastUpdate) / 1000; // seconds
+  if (elapsed >= 1) {
+    const delta = s.total_packets - lastPacketCount;
+    const rpm = Math.round((delta / elapsed) * 60);
+    document.getElementById('ls-rate').textContent = rpm;
+    lastPacketCount = s.total_packets;
+    lastUpdate = now;
+  }
 }
 
 function updateUptime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  document.getElementById('stat-uptime').textContent = `${h}h ${m}m ${s}s`;
+  const str = `${h}h ${m}m ${s}s`;
+  if (document.getElementById('stat-uptime')) document.getElementById('stat-uptime').textContent = str;
 }
 
 /* ── Charts ── */
@@ -489,11 +601,11 @@ const severityChart = new Chart(severityCtx, {
 
 const timelineChart = new Chart(timelineCtx, {
   type: 'line',
-  data: { labels: Array(30).fill(''), datasets: [{ label: 'Traffic', data: Array(30).fill(0), borderColor: '#00f59b', tension: 0.4, fill: true, backgroundColor: 'rgba(0, 245, 155, 0.1)' }] },
+  data: { labels: Array(30).fill(''), datasets: [{ label: 'Traffic Rate', data: Array(30).fill(0), borderColor: '#00f59b', tension: 0.4, fill: true, backgroundColor: 'rgba(0, 245, 155, 0.1)' }] },
   options: { animation: false, scales: { y: { beginAtZero: true, grid: { color: '#2d313d' } }, x: { display: false } } }
 });
 
-let prevTotal = 0;
+let prevTotalChart = 0;
 function updateCharts(s) {
   const ac = s.attack_counts;
   attackChart.data.labels = Object.keys(ac);
@@ -506,8 +618,8 @@ function updateCharts(s) {
   });
   severityChart.update('none');
 
-  const delta = s.total_packets - prevTotal;
-  prevTotal = s.total_packets;
+  const delta = s.total_packets - prevTotalChart;
+  prevTotalChart = s.total_packets;
   timelineChart.data.datasets[0].data.push(delta);
   timelineChart.data.datasets[0].data.shift();
   timelineChart.update('none');
@@ -515,10 +627,12 @@ function updateCharts(s) {
 
 function clearLog() {
   document.getElementById('live-body').innerHTML = '';
+  document.getElementById('ls-alerts-list').innerHTML = '<div class="no-data" style="padding: 20px; text-align: center;">Waiting for incoming alerts...</div>';
+  document.getElementById('ls-alerts-filtered').textContent = '0';
 }
 
 function exportCSV() {
-  const headers = ['time','src_ip','dst_ip','protocol','service','attack_type','severity','confidence','blocked'];
+  const headers = ['time','src_ip','dst_ip', 'protocol','attack_type','severity'];
   const rows = allEvents.map(e => headers.map(h => JSON.stringify(e[h] ?? '')).join(','));
   const csv = [headers.join(','), ...rows].join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });

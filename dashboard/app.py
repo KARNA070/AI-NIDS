@@ -2,8 +2,7 @@
 app.py
 ------
 Flask + Socket.IO dashboard for real-time NIDS monitoring.
-Receives detection results via a thread-safe queue and pushes them
-to connected browsers via WebSocket events.
+Includes authentication for secure access.
 """
 
 import os
@@ -15,20 +14,19 @@ import threading
 from collections import deque, Counter
 from datetime import datetime
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, session, redirect, url_for, request
 from flask_socketio import SocketIO, emit
 
+# ── Logging ──────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-
 app = Flask(__name__, template_folder="templates", static_folder="static")
-app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET", "nids-dashboard-secret")
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET", "nids-dashboard-sf6s")
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # ── Shared in-memory state ────────────────────────────────────────────────────
-
 MAX_LOG_ENTRIES = 500          # rolling window
 _log_store: deque = deque(maxlen=MAX_LOG_ENTRIES)
 _stats: dict = {
@@ -44,22 +42,54 @@ _blocked_ips: list = []
 # Queue that main.py pushes DetectionResult dicts into
 dashboard_queue: queue.Queue = queue.Queue(maxsize=1000)
 
+# ── Authentication Helper ───────────────────────────────────────────────────
+
+def is_logged_in():
+    return session.get("logged_in")
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
+    if not is_logged_in():
+        return redirect(url_for("login"))
     return render_template("index.html")
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if is_logged_in():
+        return redirect(url_for("index"))
+    
+    if request.method == "POST":
+        user = request.form.get("username")
+        pw = request.form.get("password")
+        
+        # Hardcoded credentials for demonstration
+        # In production, use hashed passwords and a database
+        if user == "admin" and pw == "admin":
+            session["logged_in"] = True
+            session.permanent = True
+            return redirect(url_for("index"))
+        else:
+            return render_template("login.html", error="Invalid username or password")
+            
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.pop("logged_in", None)
+    return redirect(url_for("login"))
 
 @app.route("/api/logs")
 def api_logs():
-    """Return the latest log entries as JSON (REST fallback)."""
+    if not is_logged_in():
+        return jsonify({"error": "Unauthorized"}), 401
     return jsonify(list(_log_store))
-
 
 @app.route("/api/stats")
 def api_stats():
+    if not is_logged_in():
+        return jsonify({"error": "Unauthorized"}), 401
     uptime = int(time.time() - _stats["start_time"])
     return jsonify({
         "total_packets":  _stats["total_packets"],
@@ -70,9 +100,10 @@ def api_stats():
         "uptime_seconds": uptime,
     })
 
-
 @app.route("/api/blocked")
 def api_blocked():
+    if not is_logged_in():
+        return jsonify({"error": "Unauthorized"}), 401
     return jsonify(_blocked_ips)
 
 
@@ -81,10 +112,13 @@ def api_blocked():
 @socketio.on("connect")
 def on_connect():
     """Send recent history to a newly connected client."""
+    # Note: Flask-SocketIO access session differently, but simple check works
+    if not is_logged_in():
+        return False  # Refuse connection
+    
     logger.debug("Browser connected to dashboard.")
     emit("history", list(_log_store))
     emit("stats", _build_stats_payload())
-
 
 @socketio.on("disconnect")
 def on_disconnect():
